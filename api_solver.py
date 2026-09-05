@@ -157,7 +157,7 @@ def get_openapi_spec() -> Dict[str, Any]:
         "openapi": "3.0.3",
         "info": {
             "title": "Turnstile & Cloudflare Solver API",
-            "version": "1.2.0",
+            "version": "1.3.0",
             "description": "High-throughput asynchronous API solver for Cloudflare Turnstile CAPTCHA widgets and Cloudflare Interstitial / IUAM / cf_clearance challenges.",
             "contact": {
                 "name": "Turnstile Solver Team"
@@ -348,6 +348,77 @@ def get_openapi_spec() -> Dict[str, Any]:
                     }
                 }
             },
+            "/fetch": {
+                "get": {
+                    "summary": "Solve Cloudflare challenge and fetch page HTML",
+                    "description": "Solves Cloudflare IUAM / Managed Challenge OR Turnstile widget (if sitekey provided) and returns the final page HTML along with the clearance bundle.",
+                    "parameters": [
+                        {
+                            "name": "url",
+                            "in": "query",
+                            "required": True,
+                            "description": "Target website URL protected by Cloudflare.",
+                            "schema": {
+                                "type": "string",
+                                "format": "uri",
+                                "example": "https://protected-site.com"
+                            }
+                        },
+                        {
+                            "name": "sitekey",
+                            "in": "query",
+                            "required": False,
+                            "description": "Cloudflare Turnstile sitekey (if the page uses a Turnstile widget).",
+                            "schema": {
+                                "type": "string",
+                                "example": "0x4AAAAAAAJ5XXXXXXXXX"
+                            }
+                        },
+                        {
+                            "name": "action",
+                            "in": "query",
+                            "required": False,
+                            "description": "Optional Turnstile action parameter.",
+                            "schema": {
+                                "type": "string",
+                                "example": "login"
+                            }
+                        },
+                        {
+                            "name": "cdata",
+                            "in": "query",
+                            "required": False,
+                            "description": "Optional Turnstile cdata parameter.",
+                            "schema": {
+                                "type": "string",
+                                "example": "session_context_data"
+                            }
+                        },
+                        {
+                            "name": "proxy",
+                            "in": "query",
+                            "required": False,
+                            "description": "Optional custom proxy string.",
+                            "schema": {
+                                "type": "string",
+                                "example": "http://user:pass@127.0.0.1:8080"
+                            }
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Task creation response.",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/TaskCreatedResponse"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
             "/result": {
                 "get": {
                     "summary": "Retrieve Solved Task Result",
@@ -406,6 +477,22 @@ def get_openapi_spec() -> Dict[str, Any]:
                                                         "sec-ch-ua": "\"Chromium\";v=\"139\", \"Google Chrome\";v=\"139\""
                                                     },
                                                     "elapsed_time": 4.12
+                                                }
+                                            }
+                                        },
+                                        "fetch_ready": {
+                                            "summary": "Fetch result ready",
+                                            "value": {
+                                                "errorId": 0,
+                                                "status": "ready",
+                                                "solution": {
+                                                    "cf_clearance": "v1.mock_clearance_token...",
+                                                    "cookies": [...],
+                                                    "user_agent": "...",
+                                                    "headers": {...},
+                                                    "elapsed_time": 4.5,
+                                                    "html": "<!DOCTYPE html>...",
+                                                    "token": "..."  // only if sitekey was provided
                                                 }
                                             }
                                         },
@@ -527,11 +614,11 @@ def get_openapi_spec() -> Dict[str, Any]:
                             "properties": {
                                 "token": {
                                     "type": "string",
-                                    "description": "Turnstile solved response token (for Turnstile tasks)"
+                                    "description": "Turnstile solved response token (if Turnstile was solved)"
                                 },
                                 "cf_clearance": {
                                     "type": "string",
-                                    "description": "Cloudflare cf_clearance cookie value (for CF clearance tasks)"
+                                    "description": "Cloudflare cf_clearance cookie value (if applicable)"
                                 },
                                 "cookies": {
                                     "type": "array",
@@ -554,6 +641,10 @@ def get_openapi_spec() -> Dict[str, Any]:
                                 "elapsed_time": {
                                     "type": "number",
                                     "description": "Solve duration in seconds"
+                                },
+                                "html": {
+                                    "type": "string",
+                                    "description": "Final page HTML (always present for /fetch)"
                                 }
                             }
                         },
@@ -739,7 +830,7 @@ class TurnstileAPIServer:
         
         combined_text = Text()
         combined_text.append("\nHigh-throughput Turnstile & Cloudflare Solver API", style="bold white")
-        combined_text.append("\nEndpoints: /turnstile | /cf_clearance | /result | /swagger | /openapi.json", style="green")
+        combined_text.append("\nEndpoints: /turnstile | /cf_clearance | /fetch | /result | /swagger | /openapi.json", style="green")
         combined_text.append("\nFeatures: Fast Route-Intercept, Physical Mouse Clicks, IUAM Clearances", style="yellow")
         combined_text.append("\nRuntime: Quart + Patchright/Camoufox", style="cyan")
         combined_text.append("\nStorage: SQLite (WAL mode)", style="cyan")
@@ -763,6 +854,7 @@ class TurnstileAPIServer:
         self.app.before_serving(self._startup)
         self.app.route('/turnstile', methods=['GET'])(self.process_turnstile)
         self.app.route('/cf_clearance', methods=['GET'])(self.process_cf_clearance)
+        self.app.route('/fetch', methods=['GET'])(self.process_fetch)
         self.app.route('/result', methods=['GET'])(self.get_result)
         self.app.route('/openapi.json', methods=['GET'])(self.get_openapi_json)
         self.app.route('/swagger', methods=['GET'])(self.get_swagger_ui)
@@ -855,7 +947,7 @@ class TurnstileAPIServer:
                 await self.browser_pool.put((i+1, browser, config))
 
             if self.debug:
-                logger.info(f"Browser {i + 1} initialized successfully with {config['browser_name']} {config['browser_version']}")
+                logger.debug(f"Browser {i + 1} initialized successfully with {config['browser_name']} {config['browser_version']}")
 
         logger.info(f"Browser pool initialized with {self.browser_pool.qsize()} browsers")
         
@@ -1500,7 +1592,6 @@ class TurnstileAPIServer:
                 if self.debug:
                     logger.debug(f"Browser {index}: Initial navigation warning on CF URL: {str(nav_e)}")
 
-            clearance_found = False
             loop_start = time.time()
             attempt = 0
 
@@ -1510,7 +1601,6 @@ class TurnstileAPIServer:
                 cf_clearance_cookie = next((c for c in cookies if c.get('name') == 'cf_clearance'), None)
 
                 if cf_clearance_cookie and cf_clearance_cookie.get('value'):
-                    clearance_found = True
                     elapsed_time = round(time.time() - start_time, 3)
                     
                     bundle = {
@@ -1605,6 +1695,317 @@ class TurnstileAPIServer:
                 if self.debug:
                     logger.warning(f"Browser {index}: Error returning browser to pool: {str(e)}")
 
+    # --- FETCH ENDPOINT (ENHANCED) ---
+    async def process_fetch(self):
+        """Handle /fetch endpoint - solve CF challenge OR Turnstile (if sitekey provided) and return page HTML."""
+        url = request.args.get('url')
+        request_proxy = request.args.get('proxy')
+        sitekey = request.args.get('sitekey')      # optional
+        action = request.args.get('action')        # optional
+        cdata = request.args.get('cdata')          # optional
+
+        if not url or not validate_target_url(url):
+            return jsonify({
+                "errorId": 1,
+                "errorCode": "ERROR_WRONG_PAGEURL",
+                "errorDescription": "'url' parameter is required and must have a valid http/https scheme"
+            }), 200
+
+        task_id = str(uuid.uuid4())
+        await save_result(task_id, "fetch", {
+            "status": "CAPTCHA_NOT_READY",
+            "createTime": int(time.time()),
+            "url": url,
+            "sitekey": sitekey,
+            "action": action,
+            "cdata": cdata,
+            "proxy": "provided" if request_proxy else None
+        })
+
+        try:
+            asyncio.create_task(self._fetch_page(
+                task_id=task_id,
+                url=url,
+                request_proxy=request_proxy,
+                sitekey=sitekey,
+                action=action,
+                cdata=cdata
+            ))
+            if self.debug:
+                logger.debug(f"Fetch task queued with taskid {task_id}.")
+            return jsonify({
+                "errorId": 0,
+                "taskId": task_id
+            }), 200
+        except Exception as e:
+            logger.error(f"Unexpected error processing fetch request: {str(e)}")
+            return jsonify({
+                "errorId": 1,
+                "errorCode": "ERROR_UNKNOWN",
+                "errorDescription": str(e)
+            }), 200
+
+    async def _fetch_page(self, task_id: str, url: str, request_proxy: Optional[str] = None, sitekey: Optional[str] = None, action: Optional[str] = None, cdata: Optional[str] = None, max_wait_s: float = 35.0):
+        """Solve Cloudflare challenge (Turnstile if sitekey provided) and retrieve final page HTML."""
+        proxy = None
+        index, browser, b_config = await self.browser_pool.get()
+        
+        try:
+            if hasattr(browser, 'is_connected') and not browser.is_connected():
+                if self.debug:
+                    logger.warning(f"Browser {index}: Browser disconnected, skipping")
+                await self.browser_pool.put((index, browser, b_config))
+                await save_result(task_id, "fetch", {
+                    "error": "Browser disconnected",
+                    "elapsed_time": 0,
+                    "html": None
+                })
+                return
+        except Exception as e:
+            if self.debug:
+                logger.warning(f"Browser {index}: Cannot check browser state: {str(e)}")
+
+        start_time = time.time()
+        context = None
+        proxy_file_path = os.path.join(os.getcwd(), "proxies.txt")
+
+        try:
+            if request_proxy:
+                proxy = request_proxy.strip()
+                if self.debug:
+                    logger.debug("Browser %s: Using request-level proxy override for fetch", index)
+            elif self.proxy_support:
+                try:
+                    with open(proxy_file_path) as proxy_file:
+                        proxies = [line.strip() for line in proxy_file if line.strip()]
+                    proxy = random.choice(proxies) if proxies else None
+                except FileNotFoundError:
+                    if self.debug:
+                        logger.warning(f"Proxy file not found: {proxy_file_path}")
+                    proxy = None
+                except Exception as e:
+                    logger.error(f"Error reading proxy file: {str(e)}")
+                    proxy = None
+
+            context_options = {
+                "user_agent": b_config['useragent'],
+                "locale": "en-US",
+                "extra_http_headers": {
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
+            }
+
+            if b_config.get('sec_ch_ua') and b_config['sec_ch_ua'].strip():
+                context_options['extra_http_headers']['sec-ch-ua'] = b_config['sec_ch_ua']
+
+            if proxy:
+                proxy_config = parse_proxy_config(proxy)
+                context_options["proxy"] = proxy_config
+                if self.debug:
+                    logger.debug(f"Browser {index}: Creating fetch context with proxy {redact_proxy_config(proxy_config)}")
+            elif self.debug:
+                logger.debug(f"Browser {index}: Creating fetch context without proxy")
+
+            context = await browser.new_context(**context_options)
+            page = await context.new_page()
+
+            if self.browser_type in ['chromium', 'chrome', 'msedge']:
+                await page.set_viewport_size({"width": 1280, "height": 720})
+
+        except Exception as e:
+            elapsed_time = round(time.time() - start_time, 3)
+            await save_result(task_id, "fetch", {
+                "error": str(e),
+                "elapsed_time": elapsed_time,
+                "html": None
+            })
+            logger.error(f"Browser {index}: Failed to create fetch context: {str(e)}")
+            try:
+                if hasattr(browser, 'is_connected') and browser.is_connected():
+                    await self.browser_pool.put((index, browser, b_config))
+            except Exception as pool_error:
+                if self.debug:
+                    logger.warning(f"Browser {index}: Error returning browser after context failure: {str(pool_error)}")
+            return
+
+        try:
+            # If sitekey is provided, we need to solve Turnstile and then fetch the page.
+            if sitekey:
+                if self.debug:
+                    logger.debug(f"Browser {index}: Solving Turnstile (sitekey provided) and fetching page: {url}")
+                
+                # Use a similar approach as _solve_turnstile, but capture HTML after solving.
+                # We'll use the fast-path first, then fallback.
+                token = await self._solve_turnstile_fastpath(page, index, url, sitekey, action, cdata, timeout_s=5.0)
+                if not token:
+                    # Fallback to real page
+                    await self._block_rendering(page)
+                    await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                    await self._unblock_rendering(page)
+                    token = await self._poll_for_turnstile_token(page, index, max_time_s=25.0, start_time=start_time, sitekey=sitekey, action=action, cdata=cdata)
+                
+                if not token:
+                    elapsed_time = round(time.time() - start_time, 3)
+                    logger.error(f"Browser {index}: Failed to obtain Turnstile token in {elapsed_time}s")
+                    await save_result(task_id, "fetch", {
+                        "error": "Failed to solve Turnstile",
+                        "elapsed_time": elapsed_time,
+                        "html": None
+                    })
+                    return
+
+                # After token is obtained, wait a bit for page to settle and capture HTML
+                await asyncio.sleep(1.5)
+                try:
+                    await page.wait_for_load_state('networkidle', timeout=5000)
+                except Exception:
+                    pass
+                html_content = await page.content()
+                cookies = await context.cookies()
+                cf_clearance_cookie = next((c for c in cookies if c.get('name') == 'cf_clearance'), None)
+                elapsed_time = round(time.time() - start_time, 3)
+
+                bundle = {
+                    "token": token,
+                    "cf_clearance": cf_clearance_cookie.get('value') if cf_clearance_cookie else None,
+                    "cookies": cookies,
+                    "user_agent": b_config['useragent'],
+                    "headers": {
+                        "User-Agent": b_config['useragent'],
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "sec-ch-ua": b_config.get('sec_ch_ua', '')
+                    },
+                    "elapsed_time": elapsed_time,
+                    "html": html_content
+                }
+                logger.success(f"Browser {index}: Fetched page after Turnstile solve - {COLORS.get('GREEN')}{elapsed_time}s{COLORS.get('RESET')}, length {len(html_content)}")
+                await save_result(task_id, "fetch", bundle)
+                return
+
+            # --- No sitekey: solve Cloudflare IUAM (original behavior) ---
+            if self.debug:
+                logger.debug(f"Browser {index}: Solving Cloudflare IUAM for fetch: {url}")
+
+            try:
+                await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+            except Exception as nav_e:
+                if self.debug:
+                    logger.debug(f"Browser {index}: Initial navigation warning: {str(nav_e)}")
+
+            loop_start = time.time()
+            attempt = 0
+
+            while (time.time() - loop_start) < max_wait_s:
+                attempt += 1
+                cookies = await context.cookies()
+                cf_clearance_cookie = next((c for c in cookies if c.get('name') == 'cf_clearance'), None)
+
+                if cf_clearance_cookie and cf_clearance_cookie.get('value'):
+                    elapsed_time = round(time.time() - start_time, 3)
+                    
+                    await asyncio.sleep(1.5)
+                    try:
+                        await page.wait_for_load_state('networkidle', timeout=5000)
+                    except Exception:
+                        pass
+                    html_content = await page.content()
+                    
+                    bundle = {
+                        "cf_clearance": cf_clearance_cookie.get('value'),
+                        "cookies": cookies,
+                        "user_agent": b_config['useragent'],
+                        "headers": {
+                            "User-Agent": b_config['useragent'],
+                            "Accept-Language": "en-US,en;q=0.9",
+                            "sec-ch-ua": b_config.get('sec_ch_ua', '')
+                        },
+                        "elapsed_time": elapsed_time,
+                        "html": html_content
+                    }
+
+                    logger.success(f"Browser {index}: Fetched page after CF clearance - {COLORS.get('GREEN')}{elapsed_time}s{COLORS.get('RESET')}, length {len(html_content)}")
+                    await save_result(task_id, "fetch", bundle)
+                    return
+
+                # Check for CF challenge elements and attempt interactions
+                cf_challenge_selectors = [
+                    '#challenge-form',
+                    '#challenge-stage',
+                    '.cf-browser-verification',
+                    '#cf-challenge-running',
+                    'iframe[src*="challenges.cloudflare.com"]'
+                ]
+                
+                has_cf_challenge = False
+                for sel in cf_challenge_selectors:
+                    try:
+                        if await page.locator(sel).count() > 0:
+                            has_cf_challenge = True
+                            break
+                    except Exception:
+                        continue
+
+                if has_cf_challenge or attempt > 2:
+                    await self._click_physical_bounding_box(page, index)
+                    await self._find_and_click_checkbox(page, index)
+
+                wait_step = min(0.5 + (attempt * 0.1), 2.0)
+                await asyncio.sleep(wait_step)
+
+            # If we exit loop without clearance, capture whatever is there
+            elapsed_time = round(time.time() - start_time, 3)
+            cookies = await context.cookies()
+            cf_clearance_cookie = next((c for c in cookies if c.get('name') == 'cf_clearance'), None)
+            html_content = await page.content() if cf_clearance_cookie else None
+
+            if cf_clearance_cookie and cf_clearance_cookie.get('value'):
+                bundle = {
+                    "cf_clearance": cf_clearance_cookie.get('value'),
+                    "cookies": cookies,
+                    "user_agent": b_config['useragent'],
+                    "headers": {
+                        "User-Agent": b_config['useragent'],
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "sec-ch-ua": b_config.get('sec_ch_ua', '')
+                    },
+                    "elapsed_time": elapsed_time,
+                    "html": html_content
+                }
+                await save_result(task_id, "fetch", bundle)
+            else:
+                logger.error(f"Browser {index}: Failed to obtain cf_clearance in {elapsed_time}s")
+                await save_result(task_id, "fetch", {
+                    "error": "Timeout waiting for cf_clearance cookie",
+                    "elapsed_time": elapsed_time,
+                    "html": None
+                })
+
+        except Exception as e:
+            elapsed_time = round(time.time() - start_time, 3)
+            await save_result(task_id, "fetch", {
+                "error": str(e),
+                "elapsed_time": elapsed_time,
+                "html": None
+            })
+            if self.debug:
+                logger.error(f"Browser {index}: Error in fetch: {str(e)}")
+        finally:
+            try:
+                if context:
+                    await context.close()
+            except Exception as e:
+                if self.debug:
+                    logger.warning(f"Browser {index}: Error closing fetch context: {str(e)}")
+            
+            try:
+                if hasattr(browser, 'is_connected') and browser.is_connected():
+                    await self.browser_pool.put((index, browser, b_config))
+            except Exception as e:
+                if self.debug:
+                    logger.warning(f"Browser {index}: Error returning browser to pool: {str(e)}")
+
+    # --- END FETCH ---
+
     async def process_turnstile(self):
         """Handle the /turnstile endpoint requests."""
         url = request.args.get('url')
@@ -1686,7 +2087,7 @@ class TurnstileAPIServer:
             }), 200
 
     async def get_result(self):
-        """Return solved token or clearance session bundle."""
+        """Return solved token, clearance session bundle, or HTML fetch result."""
         task_id = request.args.get('id')
 
         if not task_id:
@@ -1718,7 +2119,7 @@ class TurnstileAPIServer:
             }), 200
 
         # Handle CF Clearance Result Bundle
-        if task_type == "cf_clearance" or (isinstance(result, dict) and "cf_clearance" in result):
+        if task_type == "cf_clearance" or (isinstance(result, dict) and "cf_clearance" in result and not result.get("token")):
             if isinstance(result, dict) and result.get("cf_clearance"):
                 return jsonify({
                     "errorId": 0,
@@ -1730,6 +2131,32 @@ class TurnstileAPIServer:
                         "headers": result.get("headers", {}),
                         "elapsed_time": result.get("elapsed_time", 0)
                     }
+                }), 200
+
+        # Handle Fetch Result (HTML + clearance bundle + optional token)
+        if task_type == "fetch" and isinstance(result, dict):
+            if result.get("html") is not None:
+                solution = {
+                    "cf_clearance": result.get("cf_clearance"),
+                    "cookies": result.get("cookies", []),
+                    "user_agent": result.get("user_agent", ""),
+                    "headers": result.get("headers", {}),
+                    "elapsed_time": result.get("elapsed_time", 0),
+                    "html": result.get("html")
+                }
+                # If token exists, add it
+                if result.get("token"):
+                    solution["token"] = result["token"]
+                return jsonify({
+                    "errorId": 0,
+                    "status": "ready",
+                    "solution": solution
+                }), 200
+            else:
+                return jsonify({
+                    "errorId": 1,
+                    "errorCode": "ERROR_CAPTCHA_UNSOLVABLE",
+                    "errorDescription": result.get("error") or "Failed to fetch page"
                 }), 200
 
         # Handle Turnstile Token Solution
@@ -1807,12 +2234,23 @@ class TurnstileAPIServer:
                             </div>
                         </div>
 
+                        <!-- Fetch Section -->
+                        <div class="bg-gray-700/60 p-5 rounded-lg border border-gray-600">
+                            <h2 class="text-xl font-semibold text-purple-300 mb-2 flex items-center gap-2">
+                                <span class="bg-purple-600 text-white text-xs px-2 py-0.5 rounded">GET</span> /fetch
+                            </h2>
+                            <p class="text-sm text-gray-300 mb-3">Solve Cloudflare challenge (IUAM or Turnstile if sitekey provided) and retrieve the final page HTML in one go.</p>
+                            <div class="bg-gray-900 p-3 rounded text-xs font-mono text-gray-300 break-all border border-gray-700">
+                                /fetch?url=https://protected-site.com&sitekey=0x4AAAAAAA...&proxy=http://user:pass@ip:port
+                            </div>
+                        </div>
+
                         <!-- Result Section -->
                         <div class="bg-gray-700/60 p-5 rounded-lg border border-gray-600">
                             <h2 class="text-xl font-semibold text-yellow-300 mb-2 flex items-center gap-2">
                                 <span class="bg-yellow-600 text-white text-xs px-2 py-0.5 rounded">GET</span> /result
                             </h2>
-                            <p class="text-sm text-gray-300 mb-3">Poll the solved token or clearance session bundle by taskId.</p>
+                            <p class="text-sm text-gray-300 mb-3">Poll the solved token, clearance session bundle, or HTML result by taskId.</p>
                             <div class="bg-gray-900 p-3 rounded text-xs font-mono text-gray-300 break-all border border-gray-700">
                                 /result?id=&lt;taskId&gt;
                             </div>
