@@ -492,7 +492,7 @@ def get_openapi_spec() -> Dict[str, Any]:
                                                     "headers": {...},
                                                     "elapsed_time": 4.5,
                                                     "html": "<!DOCTYPE html>...",
-                                                    "token": "..."  // only if sitekey was provided
+                                                    "token": "..."  # only if sitekey was provided
                                                 }
                                             }
                                         },
